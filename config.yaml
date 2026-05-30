@@ -1,0 +1,39 @@
+orchestration:
+  mode: "hierarchical"  # hierarchical | parallel | reactive
+  max_concurrent_agents: 5
+  timeout_seconds: 300
+
+context_store:
+  backend: "redis"  # redis | memory | sqlite
+  redis_url: "redis://localhost:6379/0"
+  namespace: "sin:ctx"
+  ttl_seconds: 3600
+
+roles:
+  planner:
+    model: "o3"
+    tools: ["sckg", "ibd", "adw"]
+    max_iterations: 10
+  coder:
+    model: "claude-4-opus"
+    tools: ["sckg", "poc", "efsm"]
+    sandbox: true
+  reviewer:
+    model: "gpt-4o"
+    tools: ["ibd", "adw", "oracle"]
+    require_approval: true
+  verifier:
+    model: "local-llama-3"
+    tools: ["poc", "adw"]
+    strict_mode: true
+
+verification:
+  enabled: true
+  cycle: "plan-execute-verify-replan"
+  max_retries: 3
+  escalate_on_failure: true
+
+logging:
+  level: "INFO"
+  format: "json"
+  output: ".sin/orchestration.log"

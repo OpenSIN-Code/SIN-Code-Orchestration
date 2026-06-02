@@ -33,6 +33,12 @@ class TaskSpec:
     timeout: float = 300.0
     retry_count: int = 3
 
+    def __post_init__(self):
+        if self.timeout < 0:
+            raise ValueError(
+                f"timeout must be >= 0, got {self.timeout}"
+            )
+
 
 @dataclass
 class TaskResult:

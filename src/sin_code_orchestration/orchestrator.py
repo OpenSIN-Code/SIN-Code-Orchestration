@@ -20,6 +20,8 @@ class Orchestrator:
     """Central orchestrator for single tasks and DAG-based workflows."""
 
     def __init__(self, max_concurrent: int = 4, verifier: bool = True):
+        if max_concurrent < 1:
+            raise ValueError(f"max_concurrent must be >= 1, got {max_concurrent}")
         self.max_concurrent = max_concurrent
         self._use_verifier = verifier
         self._verifier = Verifier(Oracle())
@@ -110,7 +112,7 @@ class Orchestrator:
         while True:
             if task_id in self._results:
                 return self._results[task_id]
-            if timeout and (time.monotonic() - start) > timeout:
+            if timeout is not None and (time.monotonic() - start) > timeout:
                 raise TimeoutError(f"wait_for {task_id} exceeded {timeout}s")
             time.sleep(0.05)
 

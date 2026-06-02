@@ -58,6 +58,8 @@ async def execute_tasks(
 
     Returns a list of TaskResult in the same order as input.
     """
+    if max_concurrent < 1:
+        raise ValueError(f"max_concurrent must be >= 1, got {max_concurrent}")
     semaphore = asyncio.Semaphore(max_concurrent)
     task_map = {t.task_id: t for t in tasks}
     results: dict[str, TaskResult] = {}

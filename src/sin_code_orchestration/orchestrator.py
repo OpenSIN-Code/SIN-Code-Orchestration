@@ -1,197 +1,123 @@
-"""Haupt-Orchestrator für Multi-Agenten-Workflows."""
-from __future__ import annotations
+"""Main orchestrator managing task submission and workflow execution.
 
-import json
+Docs: orchestrator.doc.md
+"""
+
+import asyncio
 import time
-import uuid
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-import structlog
-import yaml
-
-from .shared_context import SharedContextStore, ContextEntry, ContextStatus
-from .roles import AgentConfig, Role, ToolPermission
-from .verifier import VerificationLoop, VerificationResult, VerificationStep
-
-
-logger = structlog.get_logger()
-
-
-@dataclass
-class TaskSpec:
-    """Spezifikation einer Agenten-Aufgabe."""
-    task_id: str
-    description: str
-    role: Role
-    input_data: dict[str, Any]
-    dependencies: list[str] = field(default_factory=list)
-    timeout_seconds: int = 300
-    require_verification: bool = True
-
-
-@dataclass
-class TaskResult:
-    """Ergebnis einer ausgeführten Aufgabe."""
-    task_id: str
-    success: bool
-    output: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
-    duration_seconds: float = 0.0
-    verification_passed: bool = False
+from .role import Role
+from .task import TaskSpec, TaskResult, TaskStatus
+from .workflow import Workflow
+from .agent import Agent, EchoAgent
+from .context import Context
+from .executor import execute_tasks
+from .verifier import Verifier, Oracle
 
 
 class Orchestrator:
-    """Koordiniert Multi-Agenten-Workflows mit Verification."""
+    """Central orchestrator for single tasks and DAG-based workflows."""
 
-    def __init__(self, config_path: Optional[str] = "config.yaml"):
-        self.config = {}
-        if config_path and Path(config_path).exists():
-            with open(config_path) as f:
-                self.config = yaml.safe_load(f) or {}
+    def __init__(self, max_concurrent: int = 4, verifier: bool = True):
+        self.max_concurrent = max_concurrent
+        self._use_verifier = verifier
+        self._verifier = Verifier(Oracle())
+        self._context = Context()
+        self._agents: dict[Role, Agent] = {Role.ORCHESTRATOR: EchoAgent()}
+        self._results: dict[str, TaskResult] = {}
+        self._cancel_events: dict[str, asyncio.Event] = {}
+        self._lock = asyncio.Lock()
 
-        ctx_cfg = self.config.get("context_store", {})
-        self.ctx_store = SharedContextStore(
-            backend=ctx_cfg.get("backend", "memory"),
-            redis_url=ctx_cfg.get("redis_url"),
-            namespace=ctx_cfg.get("namespace"),
+    def register_agent(self, role: Role, agent: Agent) -> None:
+        """Register an agent for a given role."""
+        self._agents[role] = agent
+
+    async def _handle_task(self, task: TaskSpec) -> dict[str, Any]:
+        """Dispatch task to the appropriate agent."""
+        agent = self._agents.get(task.role, self._agents[Role.ORCHESTRATOR])
+        # Merge context into input data
+        enriched = dict(self._context.snapshot())
+        enriched.update(task.input_data)
+        task.input_data = enriched
+        return agent.execute(task)
+
+    def submit(self, task: TaskSpec) -> TaskResult:
+        """Submit a single task and block until it completes."""
+        return asyncio.run(self._submit_async(task))
+
+    async def _submit_async(self, task: TaskSpec) -> TaskResult:
+        """Async implementation of submit."""
+        async with self._lock:
+            self._cancel_events[task.task_id] = asyncio.Event()
+        results = await execute_tasks(
+            [task],
+            self._handle_task,
+            max_concurrent=self.max_concurrent,
+            cancel_event=self._cancel_events.get(task.task_id),
         )
-        self.verifier = VerificationLoop(
-            self.ctx_store,
-            max_retries=self.config.get("verification", {}).get("max_retries", 3),
-            escalate_on_failure=self.config.get("verification", {}).get("escalate_on_failure", True),
-        )
-        self._agent_configs: dict[str, AgentConfig] = {}
-        self._init_agent_configs()
+        result = results[0]
+        if self._use_verifier:
+            result.verification = self._verifier.verify([result])[0]
+        self._results[task.task_id] = result
+        return result
 
-    def _init_agent_configs(self):
-        roles_cfg = self.config.get("roles", {})
-        for role_name, role_cfg in roles_cfg.items():
-            tools = [ToolPermission(name=t) for t in role_cfg.get("tools", [])]
-            self._agent_configs[role_name] = AgentConfig(
-                agent_id=f"{role_name}-default",
-                role=Role(role_name),
-                model=role_cfg.get("model", "gpt-4o"),
-                tools=tools,
-                max_iterations=role_cfg.get("max_iterations", 10),
-                timeout_seconds=role_cfg.get("timeout_seconds", 300),
-                sandbox=role_cfg.get("sandbox", False),
-                require_approval=role_cfg.get("require_approval", False),
-            )
+    def submit_workflow(self, workflow: Workflow) -> list[TaskResult]:
+        """Submit a DAG workflow and return results in topological order."""
+        return asyncio.run(self._submit_workflow_async(workflow))
 
-    def submit_task(self, spec: TaskSpec) -> ContextEntry:
-        """Reicht eine neue Aufgabe ein."""
-        entry = self.ctx_store.create_entry(
-            task_id=spec.task_id,
-            agent_id=f"{spec.role.value}-default",
-            role=spec.role.value,
-            input_data=spec.input_data,
-            dependencies=spec.dependencies,
-        )
-        logger.info("Task submitted", task_id=spec.task_id, entry_id=entry.id)
-        return entry
+    async def _submit_workflow_async(self, workflow: Workflow) -> list[TaskResult]:
+        """Async implementation of submit_workflow."""
+        errors = workflow.validate()
+        if errors:
+            raise ValueError(f"Workflow validation failed: {errors[0].message}")
 
-    def execute_task(
-        self,
-        entry_id: str,
-        execute_fn,
-        verify_fn=None,
-    ) -> TaskResult:
-        """Führt eine Aufgabe mit optionaler Verifikation aus."""
-        entry = self.ctx_store.get(entry_id)
-        if not entry:
-            return TaskResult(task_id="", success=False, error="Entry not found")
+        order = workflow.topological_order()
+        tasks = [workflow.tasks()[tid] for tid in order]
 
-        start = time.time()
+        # Create a shared cancel event for the workflow
+        cancel_event = asyncio.Event()
+        async with self._lock:
+            for t in tasks:
+                self._cancel_events[t.task_id] = cancel_event
 
-        def default_verify(ctx: dict) -> VerificationResult:
-            return VerificationResult(
-                step=VerificationStep.VERIFY,
-                success=True,
-                confidence=0.9,
-            )
-
-        result = self.verifier.run(
-            entry_id=entry_id,
-            plan_fn=lambda inp: {"plan": "execute", "input": inp},
-            execute_fn=lambda plan: execute_fn(plan["input"]),
-            verify_fn=verify_fn or default_verify,
+        results = await execute_tasks(
+            tasks,
+            self._handle_task,
+            max_concurrent=self.max_concurrent,
+            cancel_event=cancel_event,
         )
 
-        duration = time.time() - start
-        return TaskResult(
-            task_id=entry.task_id,
-            success=result.success,
-            output=result.output,
-            error=result.error,
-            duration_seconds=round(duration, 2),
-            verification_passed=result.step == VerificationStep.COMPLETE,
-        )
+        if self._use_verifier:
+            verifications = self._verifier.verify(results)
+            for r, v in zip(results, verifications):
+                r.verification = v
 
-    def run_workflow(self, tasks: list[TaskSpec]) -> dict[str, TaskResult]:
-        """Führt einen Workflow mit mehreren abhängigen Aufgaben aus."""
-        results: dict[str, TaskResult] = {}
-
-        # Topologische Sortierung der Tasks nach Dependencies
-        pending = {t.task_id: t for t in tasks}
-        completed = set()
-
-        while pending:
-            ready = [
-                tid for tid, task in pending.items()
-                if all(dep in completed for dep in task.dependencies)
-            ]
-            if not ready:
-                # Deadlock oder fehlende Dependency
-                for tid, task in pending.items():
-                    results[tid] = TaskResult(
-                        task_id=tid,
-                        success=False,
-                        error=f"Unresolved dependencies: {task.dependencies}"
-                    )
-                break
-
-            for task_id in ready:
-                task = pending.pop(task_id)
-                entry = self.submit_task(task)
-
-                # Placeholder-Execute-Funktion (wird durch Agent ersetzt)
-                def execute_fn(input_data: dict, _tid=task_id) -> dict:
-                    return {"status": "executed", "task": _tid}
-
-                result = self.execute_task(entry.id, execute_fn)
-                results[task_id] = result
-
-                if result.success:
-                    completed.add(task_id)
-                else:
-                    logger.error("Task failed", task_id=task_id, error=result.error)
-                    if task.require_verification:
-                        # Abbruch bei kritischen Tasks
-                        break
-
-            time.sleep(0.1)
+        for r in results:
+            self._results[r.task_id] = r
 
         return results
 
-    def status(self, task_id: Optional[str] = None) -> dict:
-        """Gibt den Status von Tasks zurück."""
-        entries = self.ctx_store.query(task_id=task_id)
-        return {
-            "total": len(entries),
-            "by_status": {
-                s.value: sum(1 for e in entries if e.status == s)
-                for s in ContextStatus
-            },
-            "entries": [
-                {
-                    "id": e.id,
-                    "task_id": e.task_id,
-                    "role": e.role,
-                    "status": e.status.value,
-                    "created_at": e.created_at,
-                }
-                for e in entries
-            ],
-        }
+    def get_status(self, task_id: str) -> TaskStatus:
+        """Return the current status of a task."""
+        if task_id not in self._results:
+            return TaskStatus.PENDING
+        return self._results[task_id].status
+
+    def wait_for(self, task_id: str, timeout: float | None = None) -> TaskResult:
+        """Block until a task completes or timeout expires."""
+        start = time.monotonic()
+        while True:
+            if task_id in self._results:
+                return self._results[task_id]
+            if timeout and (time.monotonic() - start) > timeout:
+                raise TimeoutError(f"wait_for {task_id} exceeded {timeout}s")
+            time.sleep(0.05)
+
+    def cancel(self, task_id: str) -> None:
+        """Cancel a pending or running task."""
+        event = self._cancel_events.get(task_id)
+        if event:
+            event.set()
+        if task_id in self._results:
+            self._results[task_id].status = TaskStatus.CANCELLED

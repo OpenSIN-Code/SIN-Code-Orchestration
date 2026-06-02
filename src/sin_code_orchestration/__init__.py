@@ -1,20 +1,18 @@
-"""SIN-Code Advanced Multi-Agent Orchestration."""
-__version__ = "0.1.0"
+"""SIN-Code-Orchestration: DAG-based multi-agent orchestration engine.
 
-from .orchestrator import Orchestrator, TaskResult
-from .ca_mcp import ContextAwareMCP
-from .shared_context import SharedContextStore, ContextEntry
-from .roles import Role, AgentConfig
-from .verifier import VerificationLoop, VerificationResult
+Docs: orchestrator.doc.md
+"""
+
+from .role import Role
+from .task import TaskSpec, TaskResult, TaskStatus
+from .workflow import Workflow
+from .orchestrator import Orchestrator
 
 __all__ = [
     "Orchestrator",
+    "TaskSpec",
     "TaskResult",
-    "ContextAwareMCP",
-    "SharedContextStore",
-    "ContextEntry",
+    "TaskStatus",
     "Role",
-    "AgentConfig",
-    "VerificationLoop",
-    "VerificationResult",
+    "Workflow",
 ]

@@ -1,60 +1,42 @@
-# SIN-Code Orchestration
+# SIN-Code-Orchestration
 
-> Advanced Multi-Agent Orchestration with Context-Aware MCP and Verified Workflows.
+DAG-based multi-agent orchestration engine with parallel execution, retry, and verification.
 
-Part of the SIN-Code agent-engineering stack.
-
-## Why
-
-Single agents hit limits on complex tasks. Orchestration coordinates specialized agents (planner, coder, reviewer, verifier) with:
-- **Context-Aware MCP**: Stateful, dezentrale Koordination über Shared Context Store
-- **Role-based permissions**: Fine-grained tool access control
-- **VMAO verification loop**: Plan → Execute → Verify → Replan cycle
-- **Dependency-aware execution**: Topological workflow scheduling
-
-## Features
-
-- **Shared Context Store**: Redis/memory/SQLite backend for distributed state
-- **Role system**: Planner, Coder, Reviewer, Verifier with configurable permissions
-- **Verification loop**: Formal verification of agent outputs before progression
-- **MCP server**: Exposes orchestration primitives to any MCP-compatible agent
-- **CLI**: Submit tasks, query status, execute workflows from YAML
-
-## Quickstart
+## Install
 
 ```bash
-pip install -e .
-
-# Start the MCP server
-sin-orch serve
-
-# Submit a task
-sin-orch submit my-task coder '{"code": "def hello(): pass"}'
-
-# Run a workflow
-sin-orch workflow my-workflow.yaml
+pip install sin-code-orchestration
 ```
 
-## Configuration
+## Quick Start
 
-See `config.yaml` for:
-- Orchestration mode (hierarchical/parallel/reactive)
-- Context store backend (redis/memory/sqlite)
-- Role definitions and tool permissions
-- Verification loop parameters
+```python
+from sin_code_orchestration import Orchestrator, TaskSpec, Role, Workflow
 
-## MCP Integration
+orch = Orchestrator()
 
-```yaml
-# ~/.config/opencode/config.yaml
-mcpServers:
-  sin-orch:
-    command: sin-orch
-    args: [serve]
+# Single task
+spec = TaskSpec(task_id="t1", description="Say hello", role=Role.DEVELOPER, input_data={"text": "hello"})
+result = orch.submit(spec)
+print(result.status)  # SUCCESS
+
+# Workflow with dependencies
+wf = Workflow()
+wf.add_task(TaskSpec(task_id="build", description="Build", role=Role.DEVELOPER, input_data={}))
+wf.add_task(TaskSpec(task_id="test", description="Test", role=Role.TESTER, input_data={}, dependencies=["build"]))
+wf.add_task(TaskSpec(task_id="deploy", description="Deploy", role=Role.ARCHITECT, input_data={}, dependencies=["test"]))
+results = orch.submit_workflow(wf)
 ```
 
-Exposed tools: `create_task`, `get_task_status`, `update_task`, `query_tasks`, `await_dependencies`.
+## API
 
-## License
+- `Orchestrator(max_concurrent=4, verifier=True)` — submit tasks and workflows
+- `TaskSpec(task_id, description, role, input_data, dependencies=[], timeout=300, retry_count=3)`
+- `Workflow()` — DAG of tasks with `add_task`, `add_dependency`, `validate`, `topological_order`
+- `Agent` — base class; built-in: `EchoAgent`, `TransformAgent`, `FileAgent`
 
-MIT — see LICENSE.
+## Tests
+
+```bash
+pytest tests/ -v
+```

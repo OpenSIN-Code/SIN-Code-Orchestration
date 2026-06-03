@@ -1,6 +1,10 @@
 """SIN-Code-Orchestration: DAG-based multi-agent orchestration engine.
 
-Docs: orchestrator.doc.md
+Re-exports the public API: `Orchestrator`, `TaskSpec`, `TaskResult`,
+`TaskStatus`, `Role`, `Workflow`. See `orchestrator.doc.md` for the big
+picture and the per-module docs for details.
+
+Docs: __init__.doc.md
 """
 
 from .role import Role

@@ -3,6 +3,7 @@
 Docs: agent.doc.md
 """
 
+import os
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -52,11 +53,19 @@ class FileAgent(Agent):
     def execute(self, task: TaskSpec) -> dict[str, Any]:
         path = task.input_data.get("path")
         content = task.input_data.get("content")
+
+        # Resolve realpath and enforce workspace boundary
+        real_path = os.path.realpath(path)
+        home = os.path.expanduser("~")
+        safe_prefixes = [home, "/tmp", "/private/tmp", "/var/tmp", "/private/var"]
+        if not any(real_path.startswith(p) for p in safe_prefixes):
+            raise ValueError(f"Path traversal detected: {path} resolves outside workspace")
+
         if self.mode == "read":
-            with open(path, "r", encoding="utf-8") as f:
+            with open(real_path, "r", encoding="utf-8") as f:
                 return {"content": f.read()}
         elif self.mode == "write":
-            with open(path, "w", encoding="utf-8") as f:
+            with open(real_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            return {"written": True, "path": path}
+            return {"written": True, "path": real_path}
         raise ValueError(f"Unsupported mode: {self.mode}")

@@ -106,7 +106,7 @@ class Orchestrator:
             return TaskStatus.PENDING
         return self._results[task_id].status
 
-    def wait_for(self, task_id: str, timeout: float | None = None) -> TaskResult:
+    def wait_for(self, task_id: str, timeout: float = 30) -> TaskResult:
         """Block until a task completes or timeout expires."""
         start = time.monotonic()
         while True:
